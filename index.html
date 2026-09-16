@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小方块闯关 · 极简 2D 横版闯关</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    color: #fff;
+    font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+    padding: 16px;
+  }
+  canvas {
+    display: block;
+    width: min(96vw, 800px);
+    height: auto;
+    background: #000;
+    border: 1px solid #2a2a2a;
+    touch-action: none;
+  }
+  .tips {
+    margin: 14px 0 0;
+    font-size: 14px;
+    letter-spacing: 1px;
+    color: #9a9a9a;
+    text-align: center;
+    line-height: 1.9;
+  }
+  .tips b { color: #22c55e; font-weight: 600; }
+  .tips span { color: #5a5a5a; }
+</style>
+</head>
+<body>
+
+<canvas id="game" width="800" height="448"></canvas>
+<p class="tips">
+  方向键 &#8592; &#8594; 移动 &nbsp;|&nbsp; 空格 跳跃 &nbsp;|&nbsp; 到达 <b>绿旗</b> 过关<br>
+  <span>R 重来本关 &nbsp;·&nbsp; V 切换彩色背景 &nbsp;·&nbsp; M 开关音效</span>
+</p>
+
+<script>
+(() => {
+'use strict';
+
+/* ======================================================================
+   小方块闯关 —— 极简视觉 + 四关玩法 的融合版
+
+   · 视觉来自「极简版」：纯黑背景、白色平台、绿色终点旗，没有云山/粒子/抖动等装饰
+   · 玩法来自「四关版」：4 个关卡、金币、巡逻怪、尖刺、踩怪、计分与通关结算
+   · 音效与彩色背景默认关闭，按 M / V 可随时打开
+
+   地图字符：# 砖块   = 木板   ^ 尖刺   o 金币   E 巡逻怪   P 出生点   G 终点旗
+   ====================================================================== */
+
+/* ---------------------------- 画布与网格 ---------------------------- */
+const TILE = 32, COLS = 25, ROWS = 14;
+const W = COLS * TILE, H = ROWS * TILE;      // 800 x 448，一屏一关，不需要镜头滚动
+
+/* ------------------------- 两个可切换的开关 ------------------------- */
+let soundOn = false;   // M 键：音效（默认关，保持极简）
+let colorBg = false;   // V 键：彩色背景（默认关 = 纯黑极简风）
+
+/* ---------------------------- 手感参数 ---------------------------- */
+const GRAVITY      = 1900;      // 重力（想改难度先动这里）
+const MOVE_SPEED   = 235;       // 最大水平速度
+const ACCEL_GROUND = 1900;      // 地面加速度
+const ACCEL_AIR    = 1250;      // 空中加速度
+const FRICTION     = 2400;      // 地面摩擦
+const JUMP_V       = -565;      // 起跳速度：跳起约 84 像素（2.6 格）
+const JUMP_CUT     = -330;      // 松开跳跃键后的限速，实现「小跳 / 大跳」
+const MAX_FALL     = 950;
+const COYOTE       = 0.10;      // 离开平台后仍能起跳的宽容时间
+const JUMP_BUFFER  = 0.12;      // 落地前提前按跳的缓存时间
+const ENEMY_SPEED  = 62;        // 怪物速度
+const ENEMY_RANGE  = 3 * TILE;  // 怪物以出生点为中心来回巡逻的范围（±3 格）
+const BOUNCE_V     = -620;      // 踩到怪物后的弹起速度（比普通跳更高，踩怪是一种「上跳」手段）
+
+// —— 蹬墙跳（第二个动作动词）——
+const WALL_SLIDE   = 90;        // 贴墙下滑时的最大下落速度
+const WALL_JUMP_X  = 300;       // 蹬墙跳的水平速度（方向永远朝远离墙面的一侧）
+const WALL_JUMP_Y  = -540;      // 蹬墙跳的垂直速度
+const WALL_LOCK    = 0.14;      // 蹬墙后短暂忽略左右键，避免刚弹开就被按回墙上
+
+const PW = 20, PH = 28;         // 玩家碰撞盒尺寸
+
+/* ---------------------------- 极简配色 ---------------------------- */
+const C = {
+  bg: '#000000',
+  solid: '#ffffff',      // 白色平台
+  player: '#6ec6ff',     // 玩家方块
+  enemy: '#ff5252',      // 怪物
+  spike: '#ffa726',      // 尖刺
+  coin: '#ffd93b',       // 金币
+  flag: '#22c55e',       // 绿色终点旗
+  pole: '#ffffff',
+  text: '#ffffff',
+  dim: '#9a9a9a'
+};
+
+/* ------------------------------ 关卡 ------------------------------ */
+/* LEVELS-START */
+const LEVELS = [
+  {
+    name: '起步',
+    rows: [
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '............ooo..........',
+      '...........=====.........',
+      '..........ooo............',
+      '.........=====...........',
+      '........ooo..............',
+      '.......=====.............',
+      '.........................',
+      '.....=====...............',
+      '..P........o...........G.',
+      '#########################'
+    ]
+  },
+  {
+    name: '蹬墙跳',
+    rows: [
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '...................o.o.G.',
+      '.............#..#########',
+      '.............#..#........',
+      '.............#o.#........',
+      '.............#..#........',
+      '..P..o..o.......#........',
+      '#########################'
+    ]
+  },
+  {
+    name: '综合',
+    rows: [
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '.........................',
+      '......................oG.',
+      '..................#..####',
+      '..................#..#...',
+      '..................#o.#...',
+      '..................#..#...',
+      '..Po.^^.o.....o.E....#...',
+      '##########...############'
+    ]
+  }
+];
+/* LEVELS-END */
+
+// 彩色背景（按 V 开启）时使用的天空配色
+const SKIES = [
+  ['#5fb8f5', '#cfeeff', '#a9dca6'],
+  ['#ff9f6e', '#ffe0b0', '#e0a07a'],
+  ['#2b2a5e', '#6a55a0', '#3d3670'],
+  ['#3a2b45', '#8a4f5e', '#5b3f5c']
+];
+
+/* ------------------------------ 音效 ------------------------------ */
+let audioCtx = null;
+function beep(freq, dur, type) {
+  if (!soundOn) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'square';
+    osc.frequency.setValueAtTime(freq, t);
+    gain.gain.setValueAtTime(0.05, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + dur);
+  } catch (e) { /* 浏览器不允许播放时忽略 */ }
+}
+
+/* ------------------------------ 画布 ------------------------------ */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const FONT = '"Microsoft YaHei", "Segoe UI", system-ui, sans-serif';
+
+function fitCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+
+/* ------------------------------ 输入 ------------------------------ */
+const input = { left: false, right: false, jump: false, jumpBuffer: 0, confirm: false, restart: false };
+
+const KEYMAP = {
+  ArrowLeft: 'left', KeyA: 'left',
+  ArrowRight: 'right', KeyD: 'right',
+  ArrowUp: 'jump', KeyW: 'jump', Space: 'jump',
+  KeyR: 'restart', Enter: 'confirm', NumpadEnter: 'confirm',
+  KeyM: 'sound', KeyV: 'color'
+};
+
+function press(act) {
+  if (act === 'left' || act === 'right' || act === 'jump') input[act] = true;
+  if (act === 'jump') input.jumpBuffer = JUMP_BUFFER;
+  if (act === 'restart') input.restart = true;
+  if (act === 'confirm') input.confirm = true;
+  if (act === 'sound') { soundOn = !soundOn; if (soundOn) beep(880, 0.08, 'triangle'); }
+  if (act === 'color') colorBg = !colorBg;
+}
+
+window.addEventListener('keydown', (e) => {
+  const act = KEYMAP[e.code];
+  if (!act) return;
+  e.preventDefault();          // 阻止方向键 / 空格滚动页面
+  if (e.repeat) return;        // 长按不重复触发一次性动作
+  press(act);
+});
+
+window.addEventListener('keyup', (e) => {
+  const act = KEYMAP[e.code];
+  if (!act) return;
+  if (act === 'left' || act === 'right' || act === 'jump') input[act] = false;
+});
+
+// 切走窗口时松开按键，避免「卡键」
+window.addEventListener('blur', () => { input.left = input.right = input.jump = false; });
+
+// 触屏：左 1/4 屏向左、左 1/2 屏向右、右半屏跳跃
+const touches = { left: false, right: false };
+canvas.addEventListener('pointerdown', (e) => {
+  if (game.mode === TITLE || game.mode === WIN) { input.confirm = true; return; }
+  const box = canvas.getBoundingClientRect();
+  const x = (e.clientX - box.left) / box.width;
+  if (x < 0.25) touches.left = true;
+  else if (x < 0.5) touches.right = true;
+  else { input.jump = true; input.jumpBuffer = JUMP_BUFFER; }
+});
+const releaseTouch = () => { touches.left = touches.right = false; input.jump = false; };
+canvas.addEventListener('pointerup', releaseTouch);
+canvas.addEventListener('pointercancel', releaseTouch);
+
+/* ---------------------------- 关卡解析 ---------------------------- */
+const isSolidChar = (ch) => ch === '#' || ch === '=';
+
+function parseLevel(def) {
+  const grid = def.rows.map((row) => row.split(''));
+  const lv = {
+    name: def.name,
+    grid,
+    enemies: [], coins: [], spikes: [],
+    spawn: { x: TILE * 2, y: TILE * 13 - PH },
+    goal: { x: W - TILE * 2, y: TILE * 11, w: TILE, h: TILE * 2 },
+    totalCoins: 0
+  };
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const ch = grid[r][c];
+      if (ch === 'P') {
+        lv.spawn = { x: c * TILE + (TILE - PW) / 2, y: (r + 1) * TILE - PH };
+        grid[r][c] = '.';
+      } else if (ch === 'G') {
+        lv.goal = { x: c * TILE + 2, y: r * TILE - TILE, w: TILE - 4, h: TILE * 2 };
+        grid[r][c] = '.';
+      } else if (ch === 'E') {
+        const w = 26, h = 24;
+        lv.enemies.push({
+          x: c * TILE + (TILE - w) / 2, y: (r + 1) * TILE - h, w, h,
+          dir: Math.random() < 0.5 ? -1 : 1, speed: ENEMY_SPEED,
+          homeX: c * TILE + (TILE - w) / 2, dead: false, deadTimer: 0
+        });
+        grid[r][c] = '.';
+      } else if (ch === 'o') {
+        lv.coins.push({ x: c * TILE + TILE / 2, y: r * TILE + TILE / 2, r: 7, taken: false });
+        lv.totalCoins++;
+        grid[r][c] = '.';
+      } else if (ch === '^') {
+        lv.spikes.push({ x: c * TILE, y: r * TILE });
+        grid[r][c] = '.';
+      }
+    }
+  }
+  return lv;
+}
+
+function solidAt(lv, col, row) {
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return false;
+  return isSolidChar(lv.grid[row][col]);
+}
+const solidAtPx = (lv, px, py) => solidAt(lv, Math.floor(px / TILE), Math.floor(py / TILE));
+
+function spikeAt(lv, px, py) {
+  for (const s of lv.spikes) {
+    if (px > s.x && px < s.x + TILE && py > s.y && py < s.y + TILE) return true;
+  }
+  return false;
+}
+
+/* ------------------------------ 实体 ------------------------------ */
+const player = { x: 0, y: 0, w: PW, h: PH, vx: 0, vy: 0, onGround: false, face: 1, wall: 0, wallLock: 0 };
+
+function overlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// 是否贴着墙。返回「蹬墙后应该弹向哪边」：-1 = 往左弹，1 = 往右弹，0 = 没贴墙
+function wallDir(lv) {
+  const probes = [player.y + 6, player.y + player.h * 0.5, player.y + player.h - 5];
+  let left = false, right = false;
+  for (const py of probes) {
+    if (!left  && solidAtPx(lv, player.x - 1, py)) left = true;
+    if (!right && solidAtPx(lv, player.x + player.w + 1, py)) right = true;
+  }
+  if (left && right) return input.left ? -1 : input.right ? 1 : player.face;  // 夹在两墙之间
+  if (left)  return -1;    // 左边是墙 → 往右弹
+  if (right) return 1;     // 右边是墙 → 往左弹
+  return 0;
+}
+
+/* ---------------------------- 游戏状态 ---------------------------- */
+const TITLE = 'title', PLAY = 'play', DEAD = 'dead', CLEAR = 'clear', WIN = 'win';
+
+const game = {
+  mode: TITLE,
+  levelIndex: 0,
+  level: null,
+  runCoins: 0,     // 本次跑动累计金币
+  levelCoins: 0,   // 本关已吃金币
+  deaths: 0,
+  time: 0,         // 本关用时
+  runTime: 0,      // 总用时
+  timer: 0,
+  best: null,
+  hint: '',        // 画面下方的临时提示文字
+  hintTimer: 0
+};
+
+const TOTAL_COINS = LEVELS.reduce((n, def) => n + def.rows.join('').split('o').length - 1, 0);
+
+try {
+  const raw = localStorage.getItem('blocky-run-best');
+  if (raw) game.best = parseFloat(raw);
+} catch (e) { /* 无痕模式下忽略 */ }
+
+function loadLevel(index) {
+  game.levelIndex = index;
+  game.level = parseLevel(LEVELS[index]);
+  game.levelCoins = 0;
+  game.time = 0;
+  respawn();
+  game.mode = PLAY;
+}
+
+function respawn() {
+  const lv = game.level;
+  player.x = lv.spawn.x;
+  player.y = lv.spawn.y;
+  player.vx = 0;
+  player.vy = 0;
+  player.onGround = false;
+  player.face = 1;
+  player.wall = 0;
+  player.wallLock = 0;
+  for (const e of lv.enemies) { e.dead = false; e.deadTimer = 0; e.x = e.homeX; }
+  for (const c of lv.coins) c.taken = false;
+  game.runCoins -= game.levelCoins;    // 本关重来时，本关吃到的金币也一并退回
+  game.levelCoins = 0;
+}
+
+/* ------------------------------ 物理 ------------------------------ */
+function moveX(lv, dx) {
+  player.x += dx;
+  if (player.x < 0) { player.x = 0; player.vx = 0; }                        // 左边界
+  if (player.x + player.w > W) { player.x = W - player.w; player.vx = 0; }  // 右边界
+
+  const r0 = Math.floor(player.y / TILE);
+  const r1 = Math.floor((player.y + player.h - 1) / TILE);
+  if (player.vx > 0) {
+    const c = Math.floor((player.x + player.w - 1) / TILE);
+    for (let r = r0; r <= r1; r++) if (solidAt(lv, c, r)) { player.x = c * TILE - player.w; player.vx = 0; break; }
+  } else if (player.vx < 0) {
+    const c = Math.floor(player.x / TILE);
+    for (let r = r0; r <= r1; r++) if (solidAt(lv, c, r)) { player.x = (c + 1) * TILE; player.vx = 0; break; }
+  }
+}
+
+function moveY(lv, dy) {
+  player.y += dy;
+  const c0 = Math.floor(player.x / TILE);
+  const c1 = Math.floor((player.x + player.w - 1) / TILE);
+
+  if (player.vy > 0) {                                   // 下落：站到平台上
+    const r = Math.floor((player.y + player.h - 1) / TILE);
+    for (let c = c0; c <= c1; c++) {
+      if (solidAt(lv, c, r)) { player.y = r * TILE - player.h; player.vy = 0; player.onGround = true; break; }
+    }
+  } else if (player.vy < 0) {                            // 上升：头顶撞到平台
+    const r = Math.floor(player.y / TILE);
+    for (let c = c0; c <= c1; c++) {
+      if (solidAt(lv, c, r)) { player.y = (r + 1) * TILE; player.vy = 0; break; }
+    }
+  }
+}
+
+/* ------------------------------ 更新 ------------------------------ */
+function updatePlayer(dt) {
+  const lv = game.level;
+
+  // 是否贴着墙（和 onGround 一样，用上一帧末尾的位置判定）
+  player.wall = player.onGround ? 0 : wallDir(lv);
+
+  // 左右移动（蹬墙后的 0.14 秒不接受左右输入，保证弹得开）
+  const dir = (input.right || touches.right ? 1 : 0) - (input.left || touches.left ? 1 : 0);
+  player.wallLock = Math.max(0, player.wallLock - dt);
+  if (player.wallLock <= 0) {
+    const accel = player.onGround ? ACCEL_GROUND : ACCEL_AIR;
+    if (dir !== 0) {
+      player.vx = Math.max(-MOVE_SPEED, Math.min(MOVE_SPEED, player.vx + dir * accel * dt));
+      player.face = dir;
+    } else {
+      const f = (player.onGround ? FRICTION : ACCEL_AIR * 0.55) * dt;
+      player.vx = Math.abs(player.vx) <= f ? 0 : player.vx - Math.sign(player.vx) * f;
+    }
+  }
+
+  // 跳跃：地面跳（土狼时间 + 输入缓冲 + 松手小跳）或蹬墙跳
+  player.coyote = player.onGround ? COYOTE : Math.max(0, player.coyote - dt);
+  input.jumpBuffer = Math.max(0, input.jumpBuffer - dt);
+  if (input.jumpBuffer > 0 && player.coyote > 0) {
+    player.vy = JUMP_V;
+    player.onGround = false;
+    player.coyote = 0;
+    input.jumpBuffer = 0;
+    beep(520, 0.08, 'square');
+  } else if (input.jumpBuffer > 0 && !player.onGround && player.wall !== 0) {
+    player.vx = -player.wall * WALL_JUMP_X;   // 朝远离墙面的一侧弹开
+    player.vy = WALL_JUMP_Y;
+    player.face = -player.wall;
+    player.wallLock = WALL_LOCK;
+    input.jumpBuffer = 0;
+    beep(680, 0.09, 'square');
+  }
+  if (!input.jump && player.vy < JUMP_CUT) player.vy = JUMP_CUT;
+
+  // 重力 + 贴墙下滑（下滑时下落速度被限制住，玩家才有时间反应）
+  player.vy = Math.min(MAX_FALL, player.vy + GRAVITY * dt);
+  if (!player.onGround && player.wall !== 0 && player.vy > WALL_SLIDE) player.vy = WALL_SLIDE;
+
+  // 分步推进：速度再快也不会穿透薄平台
+  const dx = player.vx * dt, dy = player.vy * dt;
+  const steps = Math.max(1, Math.min(8, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 9)));
+  const sdt = dt / steps;
+  player.onGround = false;
+  for (let i = 0; i < steps; i++) {
+    if (player.vx !== 0) moveX(lv, player.vx * sdt);
+    if (player.vy !== 0) moveY(lv, player.vy * sdt);
+  }
+
+  if (player.y > H + 40) die();    // 掉出屏幕 = 掉进坑里
+}
+
+function updateEnemies(dt) {
+  const lv = game.level;
+  for (const e of lv.enemies) {
+    if (e.dead) { e.deadTimer -= dt; continue; }
+
+    e.x += e.dir * e.speed * dt;
+
+    const frontX = e.dir > 0 ? e.x + e.w + 1 : e.x - 1;
+    const wallAhead  = solidAtPx(lv, frontX, e.y + e.h / 2) || solidAtPx(lv, frontX, e.y + 4);
+    const gapAhead   = !solidAtPx(lv, e.dir > 0 ? e.x + e.w + 2 : e.x - 2, e.y + e.h + 3);  // 前方没地面
+    const spikeAhead = spikeAt(lv, e.dir > 0 ? e.x + e.w + 4 : e.x - 4, e.y + e.h + 4);    // 前方有尖刺
+    const tooFar     = Math.abs(e.x - e.homeX) > ENEMY_RANGE;                                // 超出巡逻范围
+
+    if (wallAhead || gapAhead || spikeAhead || tooFar) {
+      e.dir *= -1;
+      if (tooFar) e.x += e.dir * 2;
+    }
+    if (e.x < 0) { e.x = 0; e.dir = 1; }
+    if (e.x + e.w > W) { e.x = W - e.w; e.dir = -1; }
+  }
+  lv.enemies = lv.enemies.filter((e) => !(e.dead && e.deadTimer <= 0));
+}
+
+function die() {
+  if (game.mode !== PLAY) return;
+  game.mode = DEAD;
+  game.timer = 0;
+  game.deaths++;
+  beep(180, 0.25, 'sawtooth');
+}
+
+function checkPickups() {
+  const lv = game.level;
+  const body = { x: player.x, y: player.y, w: player.w, h: player.h };
+
+  // 金币
+  for (const c of lv.coins) {
+    if (c.taken) continue;
+    if (overlap(body, { x: c.x - c.r, y: c.y - c.r, w: c.r * 2, h: c.r * 2 })) {
+      c.taken = true;
+      game.levelCoins++;
+      game.runCoins++;
+      beep(1180, 0.07, 'triangle');
+      if (game.levelCoins >= lv.totalCoins) {
+        game.hint = '金币集齐，旗子打开了！';
+        game.hintTimer = 1.8;
+      }
+    }
+  }
+
+  // 尖刺（判定盒比图形略小，稍微宽容一点）
+  for (const s of lv.spikes) {
+    if (overlap(body, { x: s.x + 6, y: s.y + 14, w: TILE - 12, h: TILE - 14 })) { die(); return; }
+  }
+
+  // 怪物：从上方落下 = 踩扁，否则受伤
+  for (const e of lv.enemies) {
+    if (e.dead || !overlap(body, e)) continue;
+    if (player.vy > 60 && player.y + player.h - e.y < player.h * 0.7) {
+      e.dead = true;
+      e.deadTimer = 0.4;
+      player.vy = BOUNCE_V;
+      beep(240, 0.1, 'sawtooth');
+    } else {
+      die();
+      return;
+    }
+  }
+
+  // 终点旗：金币没集齐时旗子是灰的，碰到只会给提示
+  if (overlap(body, lv.goal)) {
+    if (game.levelCoins >= lv.totalCoins) {
+      game.mode = CLEAR;
+      game.timer = 0;
+      beep(1320, 0.16, 'triangle');
+    } else {
+      game.hint = '还差 ' + (lv.totalCoins - game.levelCoins) + ' 枚金币，旗子还没打开';
+      game.hintTimer = 1.6;
+    }
+  }
+}
+
+function update(dt) {
+  if (game.mode === PLAY) { game.time += dt; game.runTime += dt; }
+  if (game.mode === DEAD || game.mode === CLEAR) game.timer += dt;
+  if (game.hintTimer > 0) game.hintTimer -= dt;
+
+  switch (game.mode) {
+    case TITLE:
+      if (input.confirm || input.jumpBuffer > 0) {
+        game.runCoins = 0; game.deaths = 0; game.runTime = 0;
+        loadLevel(0);
+      }
+      break;
+
+    case PLAY:
+      updatePlayer(dt);
+      updateEnemies(dt);
+      if (game.mode === PLAY) checkPickups();
+      if (input.restart) respawn();
+      break;
+
+    case DEAD:
+      if (game.timer > 0.5) { respawn(); game.mode = PLAY; }
+      break;
+
+    case CLEAR:
+      if (game.timer > 1 || input.confirm || input.jumpBuffer > 0) {
+        if (game.levelIndex + 1 < LEVELS.length) {
+          loadLevel(game.levelIndex + 1);
+        } else {
+          game.mode = WIN;
+          game.timer = 0;
+          if (game.best === null || game.runTime < game.best) {
+            game.best = game.runTime;
+            try { localStorage.setItem('blocky-run-best', String(game.best)); } catch (e) {}
+          }
+        }
+      }
+      break;
+
+    case WIN:
+      if (game.timer > 0.5 && (input.confirm || input.restart || input.jumpBuffer > 0)) {
+        game.runCoins = 0; game.deaths = 0; game.runTime = 0;
+        loadLevel(0);
+      }
+      break;
+  }
+
+  input.confirm = false;
+  input.restart = false;
+}
+
+/* ------------------------------ 绘制 ------------------------------ */
+function drawBackground() {
+  if (!colorBg) {                       // 极简：纯黑
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, W, H);
+    return;
+  }
+  const sky = SKIES[game.levelIndex % SKIES.length];   // 彩色：渐变天空 + 远山
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, sky[0]);
+  g.addColorStop(1, sky[1]);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = sky[2];
+  ctx.beginPath();
+  ctx.moveTo(-40, H);
+  for (let x = -40; x <= W + 40; x += 120) ctx.quadraticCurveTo(x + 60, H - 190, x + 120, H - 30);
+  ctx.lineTo(W + 40, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawTiles(lv) {
+  ctx.fillStyle = C.solid;              // 白色平台 —— 极简风的核心
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const ch = lv.grid[r][c];
+      if (!isSolidChar(ch)) continue;
+      const x = c * TILE, y = r * TILE;
+      if (ch === '=') ctx.fillRect(x, y, TILE, 14);   // 木板薄一些，一眼能和地面区分
+      else ctx.fillRect(x, y, TILE, TILE);
+    }
+  }
+}
+
+function drawSpikes(lv) {
+  ctx.fillStyle = C.spike;
+  for (const s of lv.spikes) {
+    for (let i = 0; i < 3; i++) {
+      const bx = s.x + i * (TILE / 3);
+      ctx.beginPath();
+      ctx.moveTo(bx, s.y + TILE);
+      ctx.lineTo(bx + TILE / 6, s.y + 8);
+      ctx.lineTo(bx + TILE / 3, s.y + TILE);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+function drawCoins(lv) {
+  ctx.fillStyle = C.coin;
+  for (const c of lv.coins) {
+    if (c.taken) continue;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawGoal(lv) {
+  const g = lv.goal;
+  const open = game.levelCoins >= lv.totalCoins;   // 金币集齐后才亮起
+  const poleX = g.x + 8;
+  ctx.fillStyle = open ? C.pole : '#4a4a4a';
+  ctx.fillRect(poleX, g.y, 4, g.h);
+  ctx.fillStyle = open ? C.flag : '#3f3f3f';
+  ctx.beginPath();
+  ctx.moveTo(poleX + 4, g.y);
+  ctx.lineTo(poleX + 42, g.y + 15);
+  ctx.lineTo(poleX + 4, g.y + 30);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawEnemies(lv) {
+  for (const e of lv.enemies) {
+    if (e.dead) {
+      const k = Math.max(0, e.deadTimer / 0.4);
+      ctx.fillStyle = C.enemy;
+      ctx.fillRect(e.x, e.y + e.h - 8 * k - 2, e.w, 8 * k + 2);   // 被踩扁：一条扁红块
+    } else {
+      ctx.fillStyle = C.enemy;
+      ctx.fillRect(e.x, e.y, e.w, e.h);
+      ctx.fillStyle = '#fff';                                     // 两只眼睛表示朝向
+      const cx = e.x + e.w / 2, cy = e.y + 8;
+      ctx.fillRect(cx - 9 + e.dir * 2, cy, 6, 6);
+      ctx.fillRect(cx + 3 + e.dir * 2, cy, 6, 6);
+    }
+  }
+}
+
+function drawPlayer() {
+  // 贴墙下滑时换成浅蓝，给玩家一个「现在能蹬墙」的视觉信号
+  ctx.fillStyle = (player.wall !== 0 && !player.onGround) ? '#a9e4ff' : C.player;
+  ctx.fillRect(player.x, player.y, player.w, player.h);
+}
+
+function label(text, x, y, align, size, color) {
+  ctx.font = 'bold ' + size + 'px ' + FONT;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(0,0,0,.65)';        // 一层淡淡的描边，彩色背景下也看得清
+  ctx.fillText(text, x + 1, y + 1);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+function drawHUD() {
+  const lv = game.level;
+  const open = game.levelCoins >= lv.totalCoins;
+  label('第 ' + (game.levelIndex + 1) + '/' + LEVELS.length + ' 关 · ' + lv.name, 16, 24, 'left', 15, C.text);
+  label('金币 ' + game.levelCoins + '/' + lv.totalCoins + (open ? ' 旗子已开' : ' 旗子未开') +
+        '   死亡 ' + game.deaths + '   ' + game.runTime.toFixed(1) + 's',
+        W - 16, 24, 'right', 15, open ? C.flag : C.coin);
+}
+
+function render() {
+  drawBackground();
+
+  if (game.level) {
+    drawTiles(game.level);
+    drawSpikes(game.level);
+    drawCoins(game.level);
+    drawGoal(game.level);
+    drawEnemies(game.level);
+    drawPlayer();
+    drawHUD();
+  }
+
+  if (game.mode === TITLE) {
+    label('小方块闯关', W / 2, 116, 'center', 52, C.flag);
+    label('极简黑白 · 三关 · 白平台 · 绿旗过关', W / 2, 164, 'center', 16, C.dim);
+    label('← → 移动　　空格 跳跃', W / 2, 222, 'center', 18, C.text);
+    label('空中贴住墙会挂住，这时再按一次跳跃 = 蹬墙跳', W / 2, 254, 'center', 16, C.text);
+    label('金币要全部集齐，旗子才会变绿', W / 2, 284, 'center', 16, C.flag);
+    label('V 彩色背景　M 音效　R 重来本关', W / 2, 314, 'center', 15, C.dim);
+    if (game.best !== null) label('历史最佳通关时间 ' + game.best.toFixed(1) + ' 秒', W / 2, 344, 'center', 15, C.dim);
+    label('按 空格 / 回车 开始', W / 2, 384, 'center', 20, C.coin);
+    return;
+  }
+
+  // 临时提示（比如旗子还锁着）
+  if (game.hintTimer > 0) {
+    ctx.globalAlpha = Math.min(1, game.hintTimer * 1.4);
+    label(game.hint, W / 2, H - 32, 'center', 18, C.coin);
+    ctx.globalAlpha = 1;
+  }
+
+  if (game.mode === CLEAR) {
+    const last = game.levelIndex + 1 >= LEVELS.length;
+    label(last ? '全部通关！' : '过关！', W / 2, 150, 'center', 46, C.flag);
+    label('第 ' + (game.levelIndex + 1) + ' 关用时 ' + game.time.toFixed(1) + ' 秒', W / 2, 206, 'center', 18, C.text);
+    label('本关金币 ' + game.levelCoins + '/' + game.level.totalCoins +
+          '　累计 ' + game.runCoins + '/' + TOTAL_COINS, W / 2, 238, 'center', 18, C.text);
+    label(last ? '按 空格 查看结算' : '按 空格 立刻进入下一关', W / 2, 326, 'center', 18, C.coin);
+  } else if (game.mode === DEAD) {
+    label('再来一次', W / 2, 150, 'center', 30, C.enemy);
+    label('掉坑、碰尖刺、撞到怪物都会回到起点', W / 2, 192, 'center', 15, C.dim);
+  } else if (game.mode === WIN) {
+    label('恭喜通关！', W / 2, 126, 'center', 46, C.flag);
+    label('总用时 ' + game.runTime.toFixed(1) + ' 秒', W / 2, 184, 'center', 20, C.text);
+    label('金币 ' + game.runCoins + '/' + TOTAL_COINS + '　死亡 ' + game.deaths + ' 次', W / 2, 218, 'center', 20, C.text);
+    if (game.best !== null) label('历史最佳 ' + game.best.toFixed(1) + ' 秒', W / 2, 252, 'center', 16, C.dim);
+    label('按 空格 再玩一次', W / 2, 338, 'center', 20, C.coin);
+  }
+}
+
+/* ----------------------------- 主循环 ----------------------------- */
+let lastTime = 0;
+function loop(time) {
+  if (!lastTime) lastTime = time;
+  let dt = (time - lastTime) / 1000;
+  lastTime = time;
+  if (dt > 1 / 30) dt = 1 / 30;    // 切标签页回来不会瞬移
+  if (dt < 0) dt = 0;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+})();
+</script>
+
+</body>
+</html>
